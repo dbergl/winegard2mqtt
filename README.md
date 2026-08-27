@@ -5,10 +5,13 @@ router to MQTT, with Home Assistant discovery.
 
 Design doc: [`docs/design.md`](docs/design.md)
 
-## Where the position comes from
+A passive GNSS antenna must be installed or GPS will not work. I installed the
+[Adafruit passive GPS antenna](https://www.adafruit.com/product/2461) in my 
+Winegard Connect 2.0 4G.
 
-A GNSS antenna was fitted on 2026-08-15 and the unit produced its first fix, so
-the fixed-state schema is now known rather than guessed.
+This has also been tested on the Winegard ConnecT 5G which comes with a GPS antenna installed.
+
+## Where the position comes from
 
 `sys_status.gps` carries the position directly, as strings holding signed
 decimal degrees. **It is a strict superset of the GPS Services page**, so
