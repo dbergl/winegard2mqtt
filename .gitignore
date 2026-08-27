@@ -2,3 +2,7 @@ venv/
 __pycache__/
 *.pyc
 .pytest_cache/
+junit/
+pytest_report.html
+cov_html/
+.coverage
