@@ -3,113 +3,124 @@
 Publishes GPS position and cellular modem telemetry from a Winegard ConnecT
 router to MQTT, with Home Assistant discovery.
 
-Design doc: [`docs/design.md`](docs/design.md)
+Tested on the ConnecT 2.0 4G and the ConnecT 5G. The 5G ships with a GPS
+antenna; the 2.0 4G does not, and needs a passive GNSS antenna fitted to the
+modem's empty `ANT_GNSS` u.fl port (I used the
+[Adafruit passive GPS antenna](https://www.adafruit.com/product/2461)).
 
-A passive GNSS antenna must be installed or GPS will not work. I installed the
-[Adafruit passive GPS antenna](https://www.adafruit.com/product/2461) in my 
-Winegard Connect 2.0 4G.
-
-This has also been tested on the Winegard ConnecT 5G which comes with a GPS antenna installed.
-
-## Where the position comes from
-
-`sys_status.gps` carries the position directly, as strings holding signed
-decimal degrees. **It is a strict superset of the GPS Services page**, so
-nothing is scraped and the client fetches only this one endpoint.
-
-Checked field by field against a live fix: every value `gps.htm` renders is in
-the JSON — `UTC` as `date` + `time`, `POSITION` as `latitude` + `longitude`,
-the reporting-rate select as `gpsrate`, the *WiFi Only* checkbox as `wifi_only`,
-and the two service buttons as `tracking` / `heartbeat` (their labels give the
-action, not the state, so they read inverted). The page adds units and
-hemisphere letters that would only have to be stripped back off, and omits
-`fix`, `satellites`, `hdop`, `ttf` and `view` entirely.
-
-This holds for firmware `LEDE-BOTH-20240315`. Were a later build to populate the
-page but not the JSON, the `fix` guard below means it would surface as *no
-position* rather than a wrong one.
-
-| Key | Example | Notes |
-|---|---|---|
-| `latitude` / `longitude` | `"12.34567"` / `"-65.43210"` | Signed decimal; south and west are negative |
-| `altitude` | `"83.6"` | Metres above sea level |
-| `speed` | `"0.0"` | km/h |
-| `heading` | `"0.00"` | Degrees |
-| `date` + `time` | `"2026/08/15"` + `"22:15:30.0"` | **No `utc` key** — recombined into ISO 8601 |
-| `fix` | `"3D"` | `2D` / `3D`; absent when unlocked |
-| `satellites` | `"06"` | Used in the solution, not in view |
-| `hdop` | `"0.8"` | Published as `gps_accuracy` in metres, ×5 |
-| `view` | array | Per-satellite azimuth/elevation/SNR — not parsed |
-
-On a fix the `error` key disappears entirely. A position counts as real only
-when `fix` is `2D` or `3D`: coordinates left behind in the JSON after lock is
-lost would otherwise read as current. That case has not been observed, but the
-cost of guarding it is one comparison.
-
-`hdop` is unitless, so `gps_accuracy` scales it by a nominal 5 m
-user-equivalent range error. Crude, but it makes HA draw an honest circle rather
-than implying a pinpoint.
+Background and design decisions: [`docs/design.md`](docs/design.md).
 
 ## Configuration
+
+All settings are environment variables. Put `WINEGARD_PASSWORD` in `.env`.
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `WINEGARD_HOST` | `10.11.12.1` | Router address |
-| `WINEGARD_USERNAME` | `admin` | Fixed by the device UI |
+| `WINEGARD_USERNAME` | `admin` | Fixed by the router UI |
 | `WINEGARD_PASSWORD` | — | **Required** |
-| `WINEGARD_POLL_INTERVAL` | `60` | Seconds between polls |
+| `WINEGARD_POLL_INTERVAL` | `60` | Seconds between `sys_status` polls |
+| `WINEGARD_GPS_SOURCE` | `json` | Where position comes from: `json` or `nmea` (see below) |
+| `WINEGARD_NMEA_PORT` | `10110` | NMEA TCP port on the router (`nmea` only) |
+| `WINEGARD_NMEA_INTERVAL` | `5` | Minimum seconds between position updates (`nmea` only) |
 | `MQTT_HOST` / `MQTT_PORT` | `mosquitto` / `1883` | Broker |
 | `MQTT_USERNAME` / `MQTT_PASSWORD` | — | Broker credentials |
 | `MQTT_TOPIC_BASE` | `winegard` | Root topic |
-| `MQTT_CLIENT_ID` | `connect` | Client / topic segment |
+| `MQTT_CLIENT_ID` | `connect` | Client ID and topic segment |
 
-Set `WINEGARD_PASSWORD` in `.env`. The router ships with `admin`/`admin` and
-nags until it is changed; changing it means editing `.env` only.
+Modem telemetry always comes from the router's `sys_status` JSON. Position
+comes from one of two sources.
 
-Note the router recomputes its fix every `gpsrate` seconds (default 300, set on
-its GPS Services page, minimum 30). Polling faster than that just re-reads the
-same values.
+## Position sources
+
+### `json` (default)
+
+Reads the `gps` object in `sys_status`, the same data the router's GPS Services
+page shows, plus fix quality the page omits. Works on stock firmware.
+
+The router only refreshes this every `gpsrate` seconds (300 by default, minimum
+30, set on its GPS Services page), so polling faster than that re-reads the
+same fix.
+
+| Key | Example | Notes |
+|---|---|---|
+| `latitude` / `longitude` | `"12.34567"` / `"-65.43210"` | Signed decimal degrees |
+| `altitude` | `"83.6"` | Metres |
+| `speed` | `"0.0"` | km/h |
+| `heading` | `"0.00"` | Degrees |
+| `date` + `time` | `"2026/08/15"` + `"22:15:30.0"` | Combined into ISO 8601 UTC |
+| `fix` | `"3D"` | `2D` / `3D`; absent without a fix |
+| `satellites` | `"06"` | Used in the fix, not in view |
+| `hdop` | `"0.8"` | |
+
+Checked against firmware `LEDE-BOTH-20240315`.
+
+### `nmea` (live, 1 Hz)
+
+Reads a NMEA-0183 stream from TCP port 10110 on the router. Stock firmware has
+no such stream: install the companion service in
+[`contrib/gps-nmea-service/`](contrib/gps-nmea-service/) first (needs root SSH
+to the router). Check that it's running with `nc 10.11.12.1 10110`.
+
+| Field | Sentence |
+|---|---|
+| `latitude` / `longitude` | RMC |
+| `altitude`, `satellites`, `hdop` | GGA |
+| `speed` | VTG km/h, falling back to RMC knots |
+| `heading` | RMC course, falling back to VTG |
+| `utc` | RMC date + time |
+| `fix_type` | GSA (`2D` / `3D`) |
+
+- Lines with a bad checksum are dropped.
+- Position updates go out at most every `WINEGARD_NMEA_INTERVAL` seconds.
+  Gaining or losing the fix is published immediately.
+- If the connection is refused or closed, or sends nothing for 30 s, the
+  position is marked unavailable. It reconnects every 5 s.
+- `utc` is the time in the sentences, not when they arrived, so a stale fix
+  shows as an old *GPS Time* rather than looking current.
+
+### Validity
+
+Both sources publish a position only with a real fix: `fix` of `2D`/`3D` in
+the JSON, or RMC status `A` and a non-zero GGA quality in NMEA. Otherwise
+`gps/available` goes `offline`, and the last position is left in place rather
+than republished as current.
+
+`gps_accuracy` is `hdop × 5` m, a rough estimate that gives Home Assistant an
+accuracy circle.
+
+## Privacy
+
+With *GPS Location Service* enabled on the router's GPS Services page
+(`tracking: true` in `sys_status`), the router sends its position to Winegard's
+MQTT server. This project doesn't need that. Both position sources keep
+working with it off, so you can turn it off; the button label shows the action,
+not the current state, so confirm `sys_status` reads `tracking: false`.
 
 ## Topics
 
 | Topic | Payload |
 |---|---|
-| `winegard/connect/state` | `online` / `offline` — bridge reachability (LWT) |
-| `winegard/connect/gps/available` | `online` / `offline` — **fix validity** |
+| `winegard/connect/state` | `online` / `offline`: bridge running (LWT) |
+| `winegard/connect/gps/available` | `online` / `offline`: valid fix |
 | `winegard/connect/gps` | JSON: `latitude`, `longitude`, `altitude`, `speed`, `heading`, `utc`, `fix_type`, `satellites`, `hdop`, `gps_accuracy` |
-| `winegard/connect/modem` | JSON: `signal_percent`, `carrier`, `apn`, `state`, `internet_source` |
+| `winegard/connect/modem` | JSON: `signal_percent`, `rssi_dbm`, `band`, `mode`, `rx_bytes`, `tx_bytes`, `carrier`, `apn`, `state`, `internet_source`, `internet_status` |
 
-### Data usage counters reset on every reconnect
+All are retained. GPS sensors follow `gps/available` and modem sensors follow
+`state`, so losing the fix doesn't take the modem sensors down.
 
-`rx_bytes` / `tx_bytes` come from `networks.wwan` and are **per-session, not
-cumulative**. Observed directly: 5,554,430,940 bytes before a spontaneous LTE
-drop, 1,629,717 a few minutes after it re-established.
-
-They are published with `state_class: total_increasing` so Home Assistant
-recognises a drop as a counter reset rather than a negative delta. For
-billing-cycle totals, wrap them in a `utility_meter` helper — that accumulates
-correctly across resets.
-
-Cellular drops are routine here. They do not affect this service, which reaches
-the router over the LAN; they only interrupt remote access to the RV, since the
-Winegard is also the uplink for everything else in it.
-
-### Availability
-
-Two availability topics is deliberate. A healthy bridge with no satellite lock
-is a normal condition and distinct from a dead bridge, so the modem sensors stay
-live while the tracker correctly goes unavailable. On loss of fix the last
-position payload is left untouched rather than republished — an RV that admits
-it doesn't know where it is beats one frozen at a stale coordinate.
+`rx_bytes` / `tx_bytes` reset whenever the cellular connection drops. They are
+published as `total_increasing`, so Home Assistant treats a drop as a reset.
+For billing-cycle totals, use a `utility_meter` helper.
 
 ## Development
 
 ```bash
 python3 -m venv venv
-./venv/bin/pip install -r requirements.txt pytest
+./venv/bin/pip install -r requirements.txt -r requirements.dev.txt
 ./venv/bin/python -m pytest test/ -v
 ```
 
-Tests use real code throughout: `client_test.py` runs against a local HTTP
-server that mimics the LuCI login handshake and cookie expiry, and the parser
-fixtures are genuine captured router responses.
+Tests run without mocks: a local HTTP server mimics the router's login, a local
+TCP server plays the NMEA stream, and fixtures are captured router output with
+positions substituted.

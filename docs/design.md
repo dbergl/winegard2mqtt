@@ -144,6 +144,8 @@ winegard2mqtt/
     app.py          # poll loop, signal handling
     client.py       # login, session refresh, sys_status fetch
     parser.py       # raw response → GpsFix | None, ModemStatus
+    nmea.py         # NMEA sentences → GpsFix | None (optional source)
+    stream.py       # NMEA TCP reader thread, dedupe/throttle
     publisher.py    # MQTT topics + HA discovery payloads
   test/
     client_test.py
@@ -238,6 +240,14 @@ payload untouched. Never republish a stale position as though it were current;
 an RV that admits it does not know where it is beats one frozen at last
 Tuesday's parking spot. Modem entities stay available — that data is still good.
 
+**NMEA source (added 2026-10-12).** `WINEGARD_GPS_SOURCE=nmea` takes the
+position from a NMEA-0183 TCP stream (port 10110) that a service added to the
+router broadcasts (`contrib/gps-nmea-service/`), instead of from `sys_status`. That gives a fix every second
+rather than every `gpsrate`. A reader thread (`stream.py`) assembles GGA, RMC,
+VTG and GSA into the same `GpsFix` (`nmea.py`, pure), dedupes and throttles it,
+and the poll loop stops publishing the JSON position, so the two sources never
+write over each other. See the README for the field mapping.
+
 **Session expiry.** The cookie has `Max-Age=3600`. On a 403, or a response that
 is the login page rather than the expected content, re-login once and retry the
 request. A second failure is logged and the poll is skipped; the loop continues.
@@ -276,6 +286,13 @@ sends nothing to Winegard, but it does not stop the device's own reporting.
 `heartbeat: false`, so both were duly reverted. Worth restating now that the
 antenna works: the device knows where the rig is and reports upstream on its own
 schedule, independently of this bridge.
+
+*Update 2026-10-12:* `tracking: true` (*GPS Location Service*) means the router
+publishes its position to Winegard's MQTT server, not just diagnostics. With
+`tracking: false`, `sys_status.gps` still carries a live position, so the
+`json` source keeps working. The `nmea` source reads the modem directly and
+doesn't use this setting. Neither mode needs the upstream reporting, so it can
+stay off.
 
 **Test fixtures carry no real position.** `sys_status_fix.json` is derived from
 `sys_status_nofix.json` — already scrubbed of MAC, serial, SSID, IMSI, ICCID,

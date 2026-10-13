@@ -69,6 +69,36 @@ def test_env_overrides_defaults(monkeypatch):
     assert config.poll_interval == 30
 
 
+def test_gps_source_defaults_to_json(monkeypatch):
+    monkeypatch.setenv("WINEGARD_PASSWORD", "secret")
+    config = Config.from_env()
+    assert config.gps_source == "json"
+    assert config.nmea_port == 10110
+
+
+def test_nmea_source_is_configurable(monkeypatch):
+    monkeypatch.setenv("WINEGARD_PASSWORD", "secret")
+    monkeypatch.setenv("WINEGARD_GPS_SOURCE", "NMEA")
+    monkeypatch.setenv("WINEGARD_NMEA_PORT", "2947")
+    monkeypatch.setenv("WINEGARD_NMEA_INTERVAL", "1")
+    config = Config.from_env()
+    assert config.gps_source == "nmea"
+    assert config.nmea_port == 2947
+    assert config.nmea_interval == 1.0
+
+
+def test_an_unknown_gps_source_is_rejected(monkeypatch):
+    monkeypatch.setenv("WINEGARD_PASSWORD", "secret")
+    monkeypatch.setenv("WINEGARD_GPS_SOURCE", "serial")
+    with pytest.raises(ValueError, match="WINEGARD_GPS_SOURCE"):
+        Config.from_env()
+
+
+def test_the_nmea_socket_uses_the_bare_router_address(monkeypatch):
+    monkeypatch.setenv("WINEGARD_PASSWORD", "secret")
+    assert Config.from_env().router_hostname == "10.11.12.1"
+
+
 # --- poll cycle -------------------------------------------------------------
 
 
@@ -106,3 +136,12 @@ def test_malformed_status_does_not_kill_the_loop(publisher, mqtt):
 
     assert json.loads(mqtt.last("winegard/connect/modem")["payload"]) == {}
     assert mqtt.last("winegard/connect/gps/available")["payload"] == "offline"
+
+
+def test_poll_leaves_gps_alone_when_nmea_owns_it(publisher, mqtt):
+    """The JSON's position must not overwrite the stream's."""
+    poll_once(StubClient({"gps": {"error": "Not fixed now"}, "modem_signal": "68%"}),
+              publisher, include_gps=False)
+
+    assert mqtt.last("winegard/connect/gps/available") is None
+    assert mqtt.last("winegard/connect/modem") is not None

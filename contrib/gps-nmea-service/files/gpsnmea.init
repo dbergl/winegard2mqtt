@@ -1,0 +1,27 @@
+#!/bin/sh /etc/rc.common
+# procd init script for the GPS NMEA-0183 TCP server (modem GPS -> :10110).
+# Installs to /etc/init.d/gpsnmea.
+
+START=95
+STOP=10
+USE_PROCD=1
+PROG=/usr/bin/gpsnmea.sh
+
+start_service() {
+	[ -x "$PROG" ] || return 1
+	# Settings written by install.sh (PORT, DEV); edit and restart to change.
+	[ -r /etc/gpsnmea.conf ] && . /etc/gpsnmea.conf
+	procd_open_instance
+	procd_set_param command "$PROG"
+	# Pass config through to gpsnmea.sh; MAXAGE reaches gps-emit.sh via socat's
+	# EXEC environment. Empty BIND falls back to the uci LAN IP in gpsnmea.sh.
+	procd_set_param env \
+		PORT="${PORT:-10110}" \
+		DEV="${DEV:-/dev/ttyUSB1}" \
+		BIND="${BIND:-}" \
+		MAXAGE="${MAXAGE:-5}"
+	procd_set_param respawn
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
