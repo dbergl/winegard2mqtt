@@ -44,15 +44,20 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # :latest is frozen at the last v1 build: coach2mqtt v1 Pi images pull
+          # it and can't take breaking changes. Releases are pinned by semver.
+          flavor: |
+            latest=false
           tags: |
             # Branch event
             type=ref,event=branch
-            # Tag event
-            type=ref,event=tag
+            # Release tag vX.Y.Z -> X.Y.Z, X.Y and X (X.Y and X are skipped for
+            # pre-releases such as v2.0.0-beta.1)
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
             # Always create sha image tag
             type=sha
-            # set latest tag for default branch
-            type=raw,value=latest,enable={{is_default_branch}}
 
       -
         name: Log into registry ${{ env.REGISTRY }}
